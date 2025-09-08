@@ -14,6 +14,40 @@ from ..env import MultiAgentEnv
 from ..algo.base import MultiAgentController
 from ..utils.utils import jax_vmap
 
+def _is_safe_flags(graph_t):
+    """Compute per-agent safety flags for a single time step graph.
+    Safe := agent not overlapping or Chebyshev-adjacent (<=1) to any other agent or obstacle.
+    Returns: (N,) boolean array"""
+    import jax.numpy as jnp
+    agent_pos = graph_t.env_states.agent
+    N = agent_pos.shape[0]
+    diffs = agent_pos[:, None, :] - agent_pos[None, :, :]
+    cheb = jnp.max(jnp.abs(diffs), axis=-1)
+    unsafe_agent_agent = (cheb <= 1) & (~jnp.eye(N, dtype=bool))
+    unsafe_from_agents = jnp.any(unsafe_agent_agent, axis=1)
+    try:
+        obs_pos = graph_t.env_states.obstacle.positions
+        if obs_pos is None:
+            unsafe_from_obstacles = jnp.zeros((N,), dtype=bool)
+        else:
+            diffs_obs = agent_pos[:, None, :] - obs_pos[None, :, :]
+            cheb_obs = jnp.max(jnp.abs(diffs_obs), axis=-1)
+            unsafe_from_obstacles = jnp.any(cheb_obs <= 1, axis=1)
+    except Exception:
+        unsafe_from_obstacles = jnp.zeros((N,), dtype=bool)
+    safe = ~(unsafe_from_agents | unsafe_from_obstacles)
+    return safe
+
+def _has_reached_flags(graph_t):
+    """Per-agent reached-goal flags for a single time step graph.
+    Reach := |pos - goal| < 0.5 elementwise (L_infty < 0.5)."""
+    import jax.numpy as jnp
+    agent_pos = graph_t.env_states.agent
+    goal_pos = graph_t.env_states.goal
+    reached = jnp.all(jnp.abs(agent_pos - goal_pos) < 0.5, axis=-1)
+    return reached
+
+
 
 class Trainer:
 
@@ -108,7 +142,13 @@ class Trainer:
                 assert total_reward.shape == (self.n_env_test,)
                 reward_min, reward_max = total_reward.min(), total_reward.max()
                 reward_mean = np.mean(total_reward)
-                reward_final = np.mean(test_rollouts.rewards[:, -1])
+                # === Safety & Arrival metrics (GCBF+ definitions, re-implemented here) ===
+                _vmap_env_time_safe = jax_vmap(jax_vmap(_is_safe_flags))
+                _vmap_env_time_reach = jax_vmap(jax_vmap(_has_reached_flags))
+                safe_mask = _vmap_env_time_safe(test_rollouts.graph)
+                reach_mask = _vmap_env_time_reach(test_rollouts.graph)
+                safety_ratio = np.array(safe_mask).mean()
+                arrival_rate = np.array(reach_mask).max(axis=1).mean()
                 finish_fun = jax_vmap(jax_vmap(self.env_test.finish_mask))
                 finish = finish_fun(test_rollouts.graph).max(axis=1).mean()
                 cost = test_rollouts.costs.sum(axis=-1).mean()
@@ -118,14 +158,22 @@ class Trainer:
                     "eval/reward_final": reward_final,
                     "eval/cost": cost,
                     "eval/unsafe_frac": unsafe_frac,
-                    "eval/finish": finish,
+                    "eval/safety_ratio": float(safety_ratio),
+                    "eval/arrival_rate": float(arrival_rate),
                     "step": step,
                 }
                 wandb.log(eval_info, step=self.update_steps)
+                try:
+                    os.makedirs(self.log_dir, exist_ok=True)
+                    with open(os.path.join(self.log_dir, 'eval_metrics.jsonl'), 'a') as f:
+                        import json as _json
+                        f.write(_json.dumps({**eval_info, 'update_step': int(self.update_steps)}) + '\n')
+                except Exception as _e:
+                    tqdm.write(f'[warn] failed to write eval_metrics.jsonl: {_e}')
                 time_since_start = time() - start_time
                 eval_verbose = (f'step: {step:3}, time: {time_since_start:5.0f}s, reward: {reward_mean:9.4f}, '
                                 f'min/max reward: {reward_min:7.2f}/{reward_max:7.2f}, cost: {cost:8.4f}, '
-                                f'unsafe_frac: {unsafe_frac:6.2f}, finish: {finish:6.2f}')
+                                f'unsafe_frac: {unsafe_frac:6.2f}, safety: {safety_ratio:6.2f}, arrival: {arrival_rate:6.2f}')
                 tqdm.write(eval_verbose)
                 if self.save_log and step % self.save_interval == 0:
                     self.algo.save(os.path.join(self.model_dir), step)

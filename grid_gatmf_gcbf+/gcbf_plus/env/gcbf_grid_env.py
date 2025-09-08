@@ -460,8 +460,13 @@ def _collision_flags(agent: Array, obs: Array) -> Array:
     man  = jnp.abs(diff[..., 0]) + jnp.abs(diff[..., 1])    # (n,n)
     aa   = (man <= 1.0) & (~jnp.eye(n, dtype=jnp.bool_))
 
-    # A-O: exact equality to obstacle cells
-    ao = (obs.shape[0] > 0) & jnp.any(jnp.all(jnp.isclose(agent[:, None, :], obs[None, :, :]), axis=-1), axis=1)
+    if obs.shape[0] > 0:
+        diff_ao = agent[:, None, :] - obs[None, :, :]  # (n, no, 2)
+        man_ao = jnp.abs(diff_ao[..., 0]) + jnp.abs(diff_ao[..., 1])  # (n, no)
+        ao = jnp.any(man_ao <= 1.0, axis=1)  # (n,)
+    else:
+        ao = jnp.zeros((n,), dtype=jnp.bool_)
+
     return jnp.any(aa, axis=1) | ao
 
 def _mask_to_edges(ids_recv: Array, ids_send: Array, diffs: Array, mask: Array) -> Tuple[Array, Array, Array]:

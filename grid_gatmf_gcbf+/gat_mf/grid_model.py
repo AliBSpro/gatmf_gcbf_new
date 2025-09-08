@@ -356,12 +356,15 @@ class Model:
       - get_return() -> float
     """
     def __init__(self, *, grid_size_default: int = 6, num_agents_default: Optional[int] = None,
-                 num_obstacles_default: int = 0, device: Optional[str] = None, fully_connected_adj: bool = False):
+                 num_obstacles_default: int = 0, device: Optional[str] = None, fully_connected_adj: bool = False,
+                 max_steps_default: int = 200, seed_default: Optional[int] = None):
         self.device = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.grid_size_default = int(grid_size_default)
         self.num_agents_default = int(num_agents_default) if num_agents_default is not None else None
         self.num_obstacles_default = int(num_obstacles_default)
         self.fully_connected_adj = bool(fully_connected_adj)
+        self.max_steps_default = int(max_steps_default)
+        self.seed_default = seed_default
 
         self.env: Optional[UnifiedGridEnvTorch] = None
         self.graph: Optional[GraphsTuple] = None
@@ -375,7 +378,9 @@ class Model:
             grid_size=Ngrid,
             num_agents=Nagents,
             num_obstacles=self.num_obstacles_default,
-            device=self.device
+            device=self.device,
+            max_steps=self.max_steps_default,
+            seed=self.seed_default
         )
         self.graph = self.env.reset(seed=int(np.random.randint(0, 2**31-1)))
 
